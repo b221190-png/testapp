@@ -15,10 +15,12 @@
   CI = "false"
 
 # Redirects for React Router (SPA)
+# This should be the last rule to catch all non-file requests
 [[redirects]]
   from = "/*"
   to = "/index.html"
   status = 200
+  force = false
 
 # Headers for security and performance
 [[headers]]
