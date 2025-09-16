@@ -26,6 +26,7 @@ const io = socketIo(server, {
         "http://localhost:3001", 
         "https://localhost:3000",
         "https://localhost:3001",
+        "https://eloquent-palmier-7ba874.netlify.app", // Netlify frontend URL
         process.env.CLIENT_URL
       ].filter(Boolean);
       
@@ -60,6 +61,7 @@ const allowedOrigins = [
   "http://localhost:3001", 
   "https://localhost:3000",
   "https://localhost:3001",
+  "https://eloquent-palmier-7ba874.netlify.app", // Netlify frontend URL
   process.env.CLIENT_URL
 ].filter(Boolean);
 
