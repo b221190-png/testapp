@@ -12,6 +12,7 @@ const interviewRoutes = require('./routes/interviews');
 const eventRoutes = require('./routes/events');
 const reportRoutes = require('./routes/reports');
 const aiRoutes = require('./routes/ai');
+const User = require('./models/User');
 
 const app = express();
 const server = http.createServer(app);

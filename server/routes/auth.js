@@ -3,9 +3,7 @@ const router = express.Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Interview = require('../models/Interview');
-
-// Simple in-memory user store (replace with database in production)
-const users = new Map();
+const User = require('../models/User');
 
 // Register new interviewer
 router.post('/register', async (req, res) => {
@@ -21,35 +19,29 @@ router.post('/register', async (req, res) => {
     }
 
     // Check if user already exists
-    if (users.has(email.toLowerCase())) {
+    const existingUser = await User.findByEmail(email);
+    if (existingUser) {
       return res.status(409).json({
         success: false,
         error: 'User already exists with this email'
       });
     }
 
-    // Hash password
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(password, saltRounds);
-
-    // Store user
-    const user = {
-      id: Date.now().toString(),
+    // Create new user (password will be hashed by pre-save middleware)
+    const user = new User({
       name,
-      email: email.toLowerCase(),
-      password: hashedPassword,
+      email,
+      password,
       organization: organization || '',
-      role: 'interviewer',
-      createdAt: new Date(),
-      isActive: true
-    };
+      role: 'interviewer'
+    });
 
-    users.set(email.toLowerCase(), user);
+    await user.save();
 
     // Generate JWT token
     const token = jwt.sign(
       { 
-        userId: user.id, 
+        userId: user._id, 
         email: user.email, 
         role: user.role 
       },
@@ -61,7 +53,7 @@ router.post('/register', async (req, res) => {
       success: true,
       data: {
         user: {
-          id: user.id,
+          id: user._id,
           name: user.name,
           email: user.email,
           organization: user.organization,
@@ -73,6 +65,25 @@ router.post('/register', async (req, res) => {
     });
   } catch (error) {
     console.error('Error registering user:', error);
+    
+    // Handle MongoDB validation errors
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        message: errors.join(', ')
+      });
+    }
+    
+    // Handle MongoDB duplicate key error
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        error: 'User already exists with this email'
+      });
+    }
+
     res.status(500).json({
       success: false,
       error: 'Failed to register user',
@@ -94,8 +105,8 @@ router.post('/login', async (req, res) => {
       });
     }
 
-    // Find user
-    const user = users.get(email.toLowerCase());
+    // Find user in database
+    const user = await User.findByEmail(email);
     if (!user) {
       return res.status(401).json({
         success: false,
@@ -112,7 +123,7 @@ router.post('/login', async (req, res) => {
     }
 
     // Verify password
-    const isValidPassword = await bcrypt.compare(password, user.password);
+    const isValidPassword = await user.comparePassword(password);
     if (!isValidPassword) {
       return res.status(401).json({
         success: false,
@@ -120,10 +131,13 @@ router.post('/login', async (req, res) => {
       });
     }
 
+    // Update login info
+    await user.updateLoginInfo();
+
     // Generate JWT token
     const token = jwt.sign(
       { 
-        userId: user.id, 
+        userId: user._id, 
         email: user.email, 
         role: user.role 
       },
@@ -135,7 +149,7 @@ router.post('/login', async (req, res) => {
       success: true,
       data: {
         user: {
-          id: user.id,
+          id: user._id,
           name: user.name,
           email: user.email,
           organization: user.organization,
@@ -181,7 +195,7 @@ const verifyToken = (req, res, next) => {
 // Get current user profile
 router.get('/profile', verifyToken, async (req, res) => {
   try {
-    const user = users.get(req.user.email);
+    const user = await User.findByEmail(req.user.email);
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -192,12 +206,14 @@ router.get('/profile', verifyToken, async (req, res) => {
     res.json({
       success: true,
       data: {
-        id: user.id,
+        id: user._id,
         name: user.name,
         email: user.email,
         organization: user.organization,
         role: user.role,
-        createdAt: user.createdAt
+        createdAt: user.createdAt,
+        lastLogin: user.lastLogin,
+        loginCount: user.loginCount
       }
     });
   } catch (error) {
@@ -215,7 +231,7 @@ router.patch('/profile', verifyToken, async (req, res) => {
   try {
     const { name, organization } = req.body;
     
-    const user = users.get(req.user.email);
+    const user = await User.findByEmail(req.user.email);
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -226,14 +242,13 @@ router.patch('/profile', verifyToken, async (req, res) => {
     // Update user data
     if (name) user.name = name;
     if (organization !== undefined) user.organization = organization;
-    user.updatedAt = new Date();
 
-    users.set(req.user.email, user);
+    await user.save();
 
     res.json({
       success: true,
       data: {
-        id: user.id,
+        id: user._id,
         name: user.name,
         email: user.email,
         organization: user.organization,
@@ -243,6 +258,17 @@ router.patch('/profile', verifyToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Error updating user profile:', error);
+    
+    // Handle MongoDB validation errors
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        message: errors.join(', ')
+      });
+    }
+
     res.status(500).json({
       success: false,
       error: 'Failed to update profile',
@@ -263,7 +289,7 @@ router.patch('/change-password', verifyToken, async (req, res) => {
       });
     }
 
-    const user = users.get(req.user.email);
+    const user = await User.findByEmail(req.user.email);
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -272,7 +298,7 @@ router.patch('/change-password', verifyToken, async (req, res) => {
     }
 
     // Verify current password
-    const isValidPassword = await bcrypt.compare(currentPassword, user.password);
+    const isValidPassword = await user.comparePassword(currentPassword);
     if (!isValidPassword) {
       return res.status(401).json({
         success: false,
@@ -280,14 +306,9 @@ router.patch('/change-password', verifyToken, async (req, res) => {
       });
     }
 
-    // Hash new password
-    const saltRounds = 10;
-    const hashedNewPassword = await bcrypt.hash(newPassword, saltRounds);
-
-    // Update password
-    user.password = hashedNewPassword;
-    user.updatedAt = new Date();
-    users.set(req.user.email, user);
+    // Update password (will be hashed by pre-save middleware)
+    user.password = newPassword;
+    await user.save();
 
     res.json({
       success: true,
@@ -295,6 +316,17 @@ router.patch('/change-password', verifyToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Error changing password:', error);
+    
+    // Handle MongoDB validation errors
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        success: false,
+        error: 'Validation failed',
+        message: errors.join(', ')
+      });
+    }
+
     res.status(500).json({
       success: false,
       error: 'Failed to change password',
@@ -367,31 +399,18 @@ router.post('/logout', verifyToken, (req, res) => {
 // Create default demo user for testing
 const createDemoUser = async () => {
   try {
-    const demoEmail = 'demo@proctoring.com';
-    
-    if (!users.has(demoEmail)) {
-      const hashedPassword = await bcrypt.hash('demo123', 10);
-      
-      const demoUser = {
-        id: 'demo-user-id',
-        name: 'Demo Interviewer',
-        email: demoEmail,
-        password: hashedPassword,
-        organization: 'Demo Organization',
-        role: 'interviewer',
-        createdAt: new Date(),
-        isActive: true
-      };
-
-      users.set(demoEmail, demoUser);
-      console.log('Demo user created: demo@proctoring.com / demo123');
-    }
+    await User.createDemoUser();
   } catch (error) {
     console.error('Error creating demo user:', error);
   }
 };
 
-// Create demo user on startup
-createDemoUser();
+// Initialize demo user on startup
+const initializeDemoUser = () => {
+  // Wait for MongoDB connection before creating demo user
+  setTimeout(createDemoUser, 2000);
+};
+
+initializeDemoUser();
 
 module.exports = { router, verifyToken };
